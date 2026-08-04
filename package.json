@@ -1,0 +1,25 @@
+{
+  "name": "solace-mqtt-qos1-shared-sub-demo",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Visual demo: publish with MQTT 5 (QoS 1), consume with the Solace SMF API from a non-exclusive or partitioned queue.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "verify": "node verify-interop.mjs",
+    "verify:partitioned": "node verify-interop.mjs q/orders-partitioned"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "svelte": "^5.56.8",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.2.0"
+  },
+  "dependencies": {
+    "mqtt": "^5.15.2",
+    "solclientjs": "^10.18.3"
+  }
+}

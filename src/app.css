@@ -1,0 +1,142 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-ink-950: oklch(0.16 0.02 265);
+  --color-ink-900: oklch(0.2 0.022 265);
+  --color-ink-850: oklch(0.24 0.024 265);
+  --color-ink-800: oklch(0.29 0.026 265);
+  --color-ink-700: oklch(0.38 0.028 265);
+  --color-mqtt: oklch(0.72 0.14 195);
+  --color-solace: oklch(0.75 0.16 145);
+  --color-broker: oklch(0.76 0.15 85);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink-950);
+  color: oklch(0.93 0.01 265);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden;
+}
+
+/* Scrollbars that don't fight the dark theme. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-ink-700) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-ink-700);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/*
+ * Packet cards are walked along the drawn edge geometry by FlowLayer, which
+ * writes `transform` on every animation frame. There is intentionally no CSS
+ * transition on transform — it would fight the per-frame positioning and pull the
+ * card off the line it is supposed to be following.
+ */
+.packet {
+  position: absolute;
+  top: 0;
+  left: 0;
+  will-change: transform, opacity;
+  transition: opacity 260ms ease;
+}
+
+/* The lines messages travel along: publisher → queue → each consumer. */
+.flow-edge {
+  fill: none;
+  stroke: var(--color-ink-800);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 7;
+  stroke-linecap: round;
+  transition:
+    stroke 240ms ease,
+    stroke-width 240ms ease;
+}
+
+@keyframes edge-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+/* Brightened while a message is actually in transit on that edge. */
+.flow-edge-active {
+  stroke: color-mix(in oklab, var(--color-broker) 55%, transparent);
+  stroke-width: 2;
+  animation: edge-flow 0.6s linear infinite;
+}
+
+@keyframes packet-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--packet-glow);
+  }
+  50% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+.packet-queued {
+  animation: packet-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes flash {
+  from {
+    box-shadow: 0 0 0 0 var(--packet-glow);
+  }
+  to {
+    box-shadow: 0 0 0 14px transparent;
+  }
+}
+.packet-done {
+  animation: flash 420ms ease-out forwards;
+}
+
+/* Sliders, restyled so the demo doesn't look like a 2009 form. */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-ink-700);
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -5px;
+  height: 14px;
+  width: 14px;
+  border-radius: 999px;
+  background: var(--color-solace);
+}
+input[type='range']::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-ink-700);
+}
+input[type='range']::-moz-range-thumb {
+  border: none;
+  height: 14px;
+  width: 14px;
+  border-radius: 999px;
+  background: var(--color-solace);
+}

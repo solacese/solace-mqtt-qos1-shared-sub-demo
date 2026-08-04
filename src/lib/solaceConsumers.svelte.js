@@ -1,0 +1,585 @@
+/**
+ * The Solace SMF side: one session, N MessageConsumers bound to the same queue.
+ *
+ * This is what the demo is really about. Solace only permits MQTT shared
+ * subscriptions at QoS 0 on non-durable sessions, so MQTT alone cannot give you
+ * load-balanced *guaranteed* delivery. Binding several SMF consumers to one
+ * non-exclusive (or partitioned) queue does — and the publisher never has to know.
+ *
+ * Per Solace docs, "AMQP and MQTT clients can publish to (but not consume from)
+ * partitioned queues", which is exactly the topology here.
+ */
+
+import solace from 'solclientjs'
+import { load, save, randomSuffix } from './persist.js'
+
+// One-time factory init. Must happen before any other solclientjs call.
+const factoryProps = new solace.SolclientFactoryProperties()
+factoryProps.profile = solace.SolclientFactoryProfiles.version10_5
+solace.SolclientFactory.init(factoryProps)
+solace.SolclientFactory.setLogLevel(solace.LogLevel.WARN)
+
+export const SOLACE_DEFAULTS = {
+  url: 'ws://localhost:8008',
+  vpnName: 'default',
+  userName: 'default',
+  password: '',
+  queueName: 'q/orders',
+  topicSubscription: 'orders/>',
+  addSubscription: true,
+  partitionKeyProperty: 'QUEUE_PARTITION_KEY',
+  windowSize: 1,
+  consumerCount: 3,
+  processingDelayMs: 1200,
+}
+
+let consumerSeq = 0
+
+/** One bound consumer: its own solclientjs MessageConsumer plus demo-visible state. */
+class Consumer {
+  id
+  label
+  state = $state('connecting') // connecting | up | down | paused | disposed
+  receivedCount = $state(0)
+  keysSeen = $state([]) // distinct partition keys, in first-seen order
+  lastMessage = $state(null)
+  paused = $state(false)
+  delayMs = $state(SOLACE_DEFAULTS.processingDelayMs)
+  error = $state(null)
+  /** Mirrors #held.length so the UI can react to it. */
+  heldCount = $state(0)
+
+  /** @type {import('solclientjs').MessageConsumer} */ raw = null
+  /** Messages held back while paused, acked as soon as we resume. */
+  #held = []
+
+  constructor(id, label, delayMs) {
+    this.id = id
+    this.label = label
+    this.delayMs = delayMs
+  }
+
+  noteMessage(key) {
+    this.receivedCount++
+    const k = key ?? '(no key)'
+    if (!this.keysSeen.includes(k)) this.keysSeen.push(k)
+  }
+
+  hold(fn) {
+    this.#held.push(fn)
+    this.heldCount = this.#held.length
+  }
+
+  releaseHeld() {
+    const held = this.#held
+    this.#held = []
+    this.heldCount = 0
+    for (const fn of held) fn()
+  }
+}
+
+export class SolaceConsumers {
+  config = $state(load('solace', SOLACE_DEFAULTS))
+  status = $state('disconnected') // disconnected | connecting | connected | error
+  error = $state(null)
+  consumers = $state([])
+  /** Set once we've successfully mapped the topic onto the queue. */
+  subscriptionAdded = $state(false)
+
+  #session = null
+  #log
+  #flow
+  /** Guards addSubscription so only the first consumer attempts it. */
+  #subscriptionClaimed = false
+
+  constructor({ log, flow }) {
+    this.#log = log
+    this.#flow = flow
+  }
+
+  get connected() {
+    return this.status === 'connected'
+  }
+
+  get totalReceived() {
+    return this.consumers.reduce((n, c) => n + c.receivedCount, 0)
+  }
+
+  // ---------------------------------------------------------------- session
+
+  async connect() {
+    if (this.#session) this.disconnect()
+    save('solace', this.config)
+    this.status = 'connecting'
+    this.error = null
+    this.subscriptionAdded = false
+    this.#subscriptionClaimed = false
+
+    const { url, vpnName, userName, password } = this.config
+    this.#log.info('solace', `Connecting session to ${url} (vpn "${vpnName}")`)
+
+    let session
+    try {
+      session = solace.SolclientFactory.createSession({
+        url,
+        vpnName,
+        userName,
+        password,
+        clientName: `solace-sub-${randomSuffix()}`,
+        reconnectRetries: 0,
+        connectTimeoutInMsecs: 8000,
+      })
+    } catch (e) {
+      this.status = 'error'
+      this.error = e.message
+      this.#log.error('solace', `Could not create session: ${e.message}`)
+      return
+    }
+
+    this.#session = session
+
+    session.on(solace.SessionEventCode.UP_NOTICE, () => {
+      this.status = 'connected'
+      this.error = null
+      this.#log.ok('solace', 'Session up')
+      // Verified against a real broker: on a *partitioned* queue nothing is
+      // delivered until the broker has assigned partitions to the newly-joined
+      // consumers, which takes up to the queue's partition rebalance delay
+      // (5s by default). Messages published before then simply spool, which
+      // looks like a broken demo unless you know to expect it.
+      this.#log.info(
+        'solace',
+        'On a partitioned queue, allow a few seconds after binding for partition rebalancing before publishing — until partitions are assigned, messages just spool on the queue.'
+      )
+      // Only now can consumers be bound.
+      this.setConsumerCount(this.config.consumerCount)
+    })
+
+    session.on(solace.SessionEventCode.CONNECT_FAILED_ERROR, (e) => {
+      this.status = 'error'
+      this.error = describe(e)
+      this.#log.error('solace', `Connect failed: ${describe(e)}`)
+      this.#hintForSubcode(e)
+    })
+
+    session.on(solace.SessionEventCode.DISCONNECTED, () => {
+      this.status = 'disconnected'
+      this.#log.info('solace', 'Session disconnected')
+      this.#disposeAll()
+      if (this.#session) {
+        this.#session.dispose()
+        this.#session = null
+      }
+    })
+
+    session.on(solace.SessionEventCode.DOWN_ERROR, (e) => {
+      this.status = 'error'
+      this.error = describe(e)
+      this.#log.error('solace', `Session down: ${describe(e)}`)
+    })
+
+    try {
+      session.connect()
+    } catch (e) {
+      this.status = 'error'
+      this.error = e.message
+      this.#log.error('solace', `connect() threw: ${e.message}`)
+    }
+  }
+
+  disconnect() {
+    this.#disposeAll()
+    const session = this.#session
+    this.#session = null
+    if (session) {
+      try {
+        session.disconnect()
+      } catch {
+        /* already gone */
+      }
+    }
+    this.status = 'disconnected'
+    this.subscriptionAdded = false
+    this.#subscriptionClaimed = false
+  }
+
+  // --------------------------------------------------------------- consumers
+
+  /** Grow or shrink the consumer pool to `n`, live. */
+  setConsumerCount(n) {
+    const target = Math.max(0, Math.min(12, Math.floor(n)))
+    this.config.consumerCount = target
+    if (!this.connected) return
+    // The initial bind is not a rebalance worth narrating — only a consumer
+    // joining an already-running pool is.
+    while (this.consumers.length < target) this.addConsumer(false)
+    while (this.consumers.length > target) this.removeConsumer()
+  }
+
+  addConsumer(announceRebalance = true) {
+    if (!this.#session || this.status !== 'connected') {
+      this.#log.warn('solace', 'Session is not up — cannot bind a consumer')
+      return
+    }
+
+    const id = `c-${++consumerSeq}`
+    const consumer = new Consumer(id, `Consumer ${this.consumers.length + 1}`, this.config.processingDelayMs)
+
+    let raw
+    try {
+      raw = this.#session.createMessageConsumer({
+        queueDescriptor: { name: this.config.queueName, type: solace.QueueType.QUEUE, durable: true },
+        // CLIENT ack is what makes the simulated work delay meaningful: the
+        // broker cannot consider the message handled until we say so.
+        acknowledgeMode: solace.MessageConsumerAcknowledgeMode.CLIENT,
+        // Never create the queue from the browser. The queue's access type
+        // (non-exclusive) and partition count are the whole point of the demo
+        // and belong in broker config, not in a client's provisioning request.
+        createIfMissing: false,
+        // Load-bearing. The API default is 255, which lets the first consumer
+        // buffer the entire stream locally and makes load balancing invisible.
+        // A small window keeps messages on the queue where the broker can
+        // distribute them.
+        windowSize: clampWindow(this.config.windowSize),
+      })
+    } catch (e) {
+      this.#log.error('solace', `Could not create consumer: ${e.message}`)
+      return
+    }
+
+    consumer.raw = raw
+
+    const isJoiningExisting = announceRebalance && this.consumers.length > 0
+
+    raw.on(solace.MessageConsumerEventName.UP, () => {
+      consumer.state = consumer.paused ? 'paused' : 'up'
+      this.#log.ok('solace', `${consumer.label} bound to "${this.config.queueName}"`)
+      if (isJoiningExisting) {
+        this.#log.info(
+          'solace',
+          'A consumer joining or leaving a partitioned queue triggers a rebalance — expect a short pause before this consumer starts receiving.'
+        )
+      }
+      this.#claimSubscription(consumer)
+    })
+
+    raw.on(solace.MessageConsumerEventName.CONNECT_FAILED_ERROR, (e) => {
+      consumer.state = 'down'
+      consumer.error = describe(e)
+      this.#log.error('solace', `${consumer.label} could not bind: ${describe(e)}`)
+      this.#hintForSubcode(e)
+    })
+
+    raw.on(solace.MessageConsumerEventName.DOWN_ERROR, (e) => {
+      consumer.state = 'down'
+      consumer.error = describe(e)
+      this.#log.error('solace', `${consumer.label} down: ${describe(e)}`)
+    })
+
+    raw.on(solace.MessageConsumerEventName.GM_DISABLED, () => {
+      consumer.state = 'down'
+      consumer.error = 'Guaranteed messaging disabled on this message VPN'
+      this.#log.error(
+        'solace',
+        'Guaranteed messaging is disabled on the message VPN — a queue cannot be bound, and MQTT QoS 1 will be downgraded to QoS 0.'
+      )
+    })
+
+    raw.on(solace.MessageConsumerEventName.SUBSCRIPTION_OK, () => {
+      this.subscriptionAdded = true
+      this.#log.ok('solace', `Subscription "${this.config.topicSubscription}" mapped onto the queue`)
+    })
+
+    raw.on(solace.MessageConsumerEventName.SUBSCRIPTION_ERROR, (e) => {
+      const subcode = e?.subcode
+      if (subcode === solace.ErrorSubcode.SUBSCRIPTION_ALREADY_PRESENT) {
+        // Benign and expected on a re-run, or when the queue was pre-configured.
+        this.subscriptionAdded = true
+        this.#log.info('solace', `Subscription "${this.config.topicSubscription}" was already on the queue`)
+        return
+      }
+      this.#log.error('solace', `Adding subscription failed: ${describe(e)}`)
+      // PERMISSION_NOT_ALLOWED is by far the most common cause in practice: a
+      // queue whose permission is only `consume` cannot have subscriptions added
+      // to it by a client. It needs `modify-topic`.
+      if (subcode === solace.ErrorSubcode.PERMISSION_NOT_ALLOWED) {
+        this.#log.warn(
+          'solace',
+          `Queue "${this.config.queueName}" does not permit clients to add subscriptions. Set its permission to "modify-topic" in PubSub+ Manager, or add "${this.config.topicSubscription}" to the queue yourself and untick "Add this subscription".`
+        )
+      } else if (subcode === solace.ErrorSubcode.SUBSCRIPTION_ACL_DENIED) {
+        this.#log.warn(
+          'solace',
+          `The client username "${this.config.userName}" is denied this topic by an ACL profile.`
+        )
+      }
+    })
+
+    raw.on(solace.MessageConsumerEventName.MESSAGE, (message) => {
+      this.#onMessage(consumer, message)
+    })
+
+    raw.on(solace.MessageConsumerEventName.DISPOSED, () => {
+      consumer.state = 'disposed'
+    })
+
+    this.consumers.push(consumer)
+
+    try {
+      raw.connect()
+    } catch (e) {
+      consumer.state = 'down'
+      consumer.error = e.message
+      this.#log.error('solace', `${consumer.label} connect() threw: ${e.message}`)
+    }
+  }
+
+  removeConsumer(id = null) {
+    const index = id ? this.consumers.findIndex((c) => c.id === id) : this.consumers.length - 1
+    if (index < 0) return
+    const [consumer] = this.consumers.splice(index, 1)
+    this.config.consumerCount = this.consumers.length
+    this.#dispose(consumer)
+    this.#log.info('solace', `${consumer.label} removed — its unacked messages will be redelivered elsewhere`)
+    // Its in-flight cards have no anchor any more.
+    this.#flow.consumerGone(consumer.id)
+  }
+
+  togglePause(id) {
+    const consumer = this.consumers.find((c) => c.id === id)
+    if (!consumer) return
+    consumer.paused = !consumer.paused
+    if (consumer.paused) {
+      // Stop the flow of new messages at the API level, so the broker sends the
+      // backlog to the other consumers instead of it piling up locally.
+      try {
+        consumer.raw?.stop()
+      } catch {
+        /* not up yet */
+      }
+      consumer.state = 'paused'
+      this.#log.info('solace', `${consumer.label} paused`)
+    } else {
+      try {
+        consumer.raw?.start()
+      } catch {
+        /* not up yet */
+      }
+      consumer.state = 'up'
+      consumer.releaseHeld()
+      this.#log.info('solace', `${consumer.label} resumed`)
+    }
+  }
+
+  setDelay(id, ms) {
+    const consumer = this.consumers.find((c) => c.id === id)
+    if (consumer) consumer.delayMs = ms
+  }
+
+  /** Apply the panel-level default delay to every existing consumer. */
+  applyDelayToAll(ms) {
+    this.config.processingDelayMs = ms
+    for (const c of this.consumers) c.delayMs = ms
+  }
+
+  // ----------------------------------------------------------------- internal
+
+  /**
+   * Map the MQTT topic onto the queue exactly once. Every consumer binding to
+   * the same queue would otherwise race to add the same subscription, producing
+   * a flurry of SUBSCRIPTION_ALREADY_PRESENT errors.
+   */
+  #claimSubscription(consumer) {
+    if (!this.config.addSubscription) return
+    if (this.#subscriptionClaimed) return
+    this.#subscriptionClaimed = true
+    const topic = this.config.topicSubscription?.trim()
+    if (!topic) return
+    try {
+      consumer.raw.addSubscription(
+        solace.SolclientFactory.createTopicDestination(topic),
+        `sub-${consumer.id}`,
+        5000
+      )
+      this.#log.info('solace', `Adding subscription "${topic}" to queue "${this.config.queueName}"`)
+    } catch (e) {
+      this.#subscriptionClaimed = false
+      this.#log.error('solace', `addSubscription threw: ${e.message}`)
+    }
+  }
+
+  #onMessage(consumer, message) {
+    const payload = readPayload(message)
+    const userProperties = readUserProperties(message)
+    const topic = message.getDestination()?.getName() ?? '(unknown)'
+    const redelivered = message.isRedelivered?.() ?? false
+
+    // Prefer the partition key as it actually arrived in the SMF user property
+    // map — that is the fact this demo exists to show. Fall back to the payload
+    // copy only so the UI still has something to colour by if the property did
+    // not survive the MQTT->SMF hop.
+    const propKey = userProperties[this.config.partitionKeyProperty]
+    const bodyKey = payload.json?.partitionKey ?? null
+    const key = propKey ?? bodyKey ?? null
+    const id = payload.json?.demoMsgId ?? userProperties.demoMsgId ?? null
+
+    if (propKey === undefined && bodyKey) {
+      this.#log.warn(
+        'solace',
+        `"${this.config.partitionKeyProperty}" was not in the received user properties (saw: ${Object.keys(userProperties).join(', ') || 'none'}). Colouring by the payload copy instead.`
+      )
+    }
+
+    consumer.noteMessage(key)
+    consumer.lastMessage = {
+      topic,
+      key,
+      propertyKeyPresent: propKey !== undefined,
+      userProperties,
+      body: payload.text,
+      redelivered,
+      receivedAt: new Date().toLocaleTimeString(),
+    }
+
+    const packet = this.#flow.received({
+      id,
+      key,
+      topic,
+      payload: payload.text,
+      size: payload.text.length,
+      consumerId: consumer.id,
+      redelivered,
+      userProperties,
+    })
+
+    this.#log.info(
+      'solace',
+      `${consumer.label} received ${topic}${key ? ` [key=${key}]` : ''}${redelivered ? ' (redelivered)' : ''}`
+    )
+
+    const ack = () => {
+      try {
+        message.acknowledge()
+        this.#flow.completed(packet.id)
+      } catch (e) {
+        this.#log.error('solace', `acknowledge() failed: ${e.message}`)
+      }
+    }
+
+    // The simulated work window. A paused consumer holds its message unacked,
+    // which is the honest depiction of a stalled worker.
+    const delay = Math.max(0, consumer.delayMs)
+    this.#flow.startProcessing(packet, delay)
+
+    setTimeout(() => {
+      if (consumer.paused) {
+        consumer.hold(ack)
+        return
+      }
+      ack()
+    }, delay)
+  }
+
+  #dispose(consumer) {
+    try {
+      consumer.raw?.disconnect()
+    } catch {
+      /* may not be up */
+    }
+    try {
+      consumer.raw?.dispose()
+    } catch {
+      /* already disposed */
+    }
+    consumer.state = 'disposed'
+  }
+
+  #disposeAll() {
+    for (const c of this.consumers) this.#dispose(c)
+    this.consumers = []
+  }
+
+  /** Turn the most common binding failures into something actionable. */
+  #hintForSubcode(e) {
+    const sub = e?.subcode
+    const S = solace.ErrorSubcode
+    if (sub === S.UNKNOWN_QUEUE_NAME || sub === S.QUEUE_NOT_FOUND) {
+      this.#log.warn(
+        'solace',
+        `Queue "${this.config.queueName}" does not exist. Create it in PubSub+ Manager as a durable, non-exclusive queue (optionally with a partition count) — this app never provisions queues.`
+      )
+    } else if (sub === S.LOGIN_FAILURE || sub === S.INVALID_SESSION_OPERATION) {
+      this.#log.warn('solace', 'Check the message VPN name, client username and password.')
+    } else if (sub === S.CONNECTION_ERROR || sub === S.TIMEOUT) {
+      this.#log.warn(
+        'solace',
+        'No SMF-over-WebSocket connection. Local broker default is ws://localhost:8008; Solace Cloud uses the secured web-messaging URI (wss://…:443).'
+      )
+    }
+  }
+}
+
+// ------------------------------------------------------------------ helpers
+
+function clampWindow(n) {
+  const v = Math.floor(Number(n) || 1)
+  return Math.max(1, Math.min(255, v))
+}
+
+/** Message payload, whichever of the two SMF payload slots it arrived in. */
+function readPayload(message) {
+  let text = ''
+  try {
+    const bin = message.getBinaryAttachment()
+    if (bin) {
+      text = typeof bin === 'string' ? bin : new TextDecoder().decode(bin)
+    } else {
+      // An SMF publisher may have used the XML/SDT slot instead.
+      text = message.getSdtContainer()?.getValue?.() ?? ''
+    }
+  } catch {
+    text = '(unreadable payload)'
+  }
+  let json = null
+  try {
+    json = JSON.parse(text)
+  } catch {
+    /* not JSON — fine, the demo still works, just without correlation */
+  }
+  return { text, json: json && typeof json === 'object' ? json : null }
+}
+
+/** Flatten the SMF user property map into a plain object for display. */
+function readUserProperties(message) {
+  const out = {}
+  try {
+    const map = message.getUserPropertyMap()
+    if (!map) return out
+    for (const key of map.getKeys()) {
+      const value = map.getField(key)?.getValue()
+      out[key] = value instanceof Uint8Array ? new TextDecoder().decode(value) : String(value)
+    }
+  } catch {
+    /* nothing usable */
+  }
+  return out
+}
+
+function describe(e) {
+  if (!e) return 'unknown error'
+  const parts = [e.message || e.infoStr || String(e)]
+  if (e.subcode !== undefined) parts.push(`subcode ${subcodeName(e.subcode)}`)
+  if (e.responseCode) parts.push(`response ${e.responseCode}`)
+  return parts.join(', ')
+}
+
+let subcodeNames = null
+function subcodeName(code) {
+  if (!subcodeNames) {
+    subcodeNames = new Map()
+    for (const [name, value] of Object.entries(solace.ErrorSubcode)) {
+      if (typeof value === 'number' || typeof value === 'string') subcodeNames.set(value, name)
+    }
+  }
+  return subcodeNames.get(code) ?? code
+}
