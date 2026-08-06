@@ -5,6 +5,7 @@
     connected: 'bg-emerald-400 shadow-[0_0_10px] shadow-emerald-400/60',
     up: 'bg-emerald-400 shadow-[0_0_10px] shadow-emerald-400/60',
     connecting: 'bg-amber-400 animate-pulse',
+    draining: 'bg-amber-400 animate-pulse',
     paused: 'bg-sky-400',
     disconnected: 'bg-slate-600',
     down: 'bg-rose-500',

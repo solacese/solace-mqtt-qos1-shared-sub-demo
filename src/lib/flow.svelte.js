@@ -185,6 +185,24 @@ export class FlowStore {
     this.#byId.clear()
   }
 
+  /**
+   * Drop the cards that have not reached a consumer yet.
+   *
+   * Used when the queue is drained out from under them on connect: those messages
+   * really were consumed, just not by anything this visualisation shows, so
+   * leaving the cards resting at the queue node would be a lie. Cards already in
+   * flight to a consumer are left alone — they resolve on their own.
+   */
+  clearPending() {
+    for (const p of [...this.packets]) {
+      if (p.phase === 'publishing' || p.phase === 'queued') {
+        const i = this.packets.indexOf(p)
+        if (i !== -1) this.packets.splice(i, 1)
+        this.#byId.delete(p.id)
+      }
+    }
+  }
+
   #insert(packet) {
     this.packets.push(packet)
     this.#byId.set(packet.id, packet)

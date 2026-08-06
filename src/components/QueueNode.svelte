@@ -1,7 +1,7 @@
 <script>
   import { anchor } from '../lib/anchors.js'
 
-  let { queueName, depth, subscription, subscriptionAdded, bound, registry } = $props()
+  let { queueName, depth, subscription, subscriptionAdded, bound, draining, registry } = $props()
 </script>
 
 <!-- Static representation of the broker's queue: the hub every flow line meets at. -->
@@ -26,7 +26,13 @@
       awaiting consumer
     </span>
 
-    {#if !bound}
+    {#if draining}
+      <span
+        class="absolute -bottom-2 animate-pulse rounded-full bg-ink-900 px-2 py-0.5 text-[9px] whitespace-nowrap text-amber-300 ring-1 ring-amber-500/40"
+      >
+        draining backlog…
+      </span>
+    {:else if !bound}
       <span
         class="absolute -bottom-2 rounded-full bg-ink-900 px-2 py-0.5 text-[9px] whitespace-nowrap text-slate-500 ring-1 ring-ink-700"
       >

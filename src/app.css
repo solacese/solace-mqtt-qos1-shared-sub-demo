@@ -107,6 +107,36 @@ body {
   animation: flash 420ms ease-out forwards;
 }
 
+/*
+ * Comparison tab: a message chip travelling one leg of the dispatch diagram.
+ *
+ * Unlike the live demo's packet cards — which are positioned per animation frame
+ * from measured DOM boxes and therefore must not have a transform transition —
+ * the diagram's geometry is fixed percentages I control. So the browser can do
+ * the interpolation, and left/top are safe to transition.
+ */
+.sim-chip {
+  position: absolute;
+  translate: -50% -50%;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  line-height: 1.4;
+  white-space: nowrap;
+  /* --hop is set inline from HOP_MS, so the travel time and the stage machine
+     that drives it cannot drift apart. */
+  transition:
+    left var(--hop, 560ms) cubic-bezier(0.4, 0, 0.2, 1),
+    top var(--hop, 560ms) cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 200ms ease;
+}
+
+/* Acknowledged and about to disappear. */
+.sim-chip-landed {
+  opacity: 0;
+}
+
 /* Sliders, restyled so the demo doesn't look like a 2009 form. */
 input[type='range'] {
   -webkit-appearance: none;

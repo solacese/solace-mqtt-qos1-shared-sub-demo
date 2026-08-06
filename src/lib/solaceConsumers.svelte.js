@@ -31,7 +31,18 @@ export const SOLACE_DEFAULTS = {
   windowSize: 1,
   consumerCount: 3,
   processingDelayMs: 1200,
+  drainOnConnect: true,
 }
+
+/**
+ * There is no broker event for "the queue is empty now", so quiescence is the
+ * signal: this long without a delivery means the backlog is gone.
+ */
+const DRAIN_QUIET_MS = 1200
+/** Ceiling, so a queue somebody else is still publishing to can't stall the demo. */
+const DRAIN_MAX_MS = 20000
+/** The drain wants throughput; the demo consumers deliberately want the opposite. */
+const DRAIN_WINDOW = 255
 
 let consumerSeq = 0
 
@@ -80,17 +91,21 @@ class Consumer {
 
 export class SolaceConsumers {
   config = $state(load('solace', SOLACE_DEFAULTS))
-  status = $state('disconnected') // disconnected | connecting | connected | error
+  status = $state('disconnected') // disconnected | connecting | draining | connected | error
   error = $state(null)
   consumers = $state([])
   /** Set once we've successfully mapped the topic onto the queue. */
   subscriptionAdded = $state(false)
+  /** Messages discarded by the pre-flight drain, for the UI to show. */
+  drainedCount = $state(0)
 
   #session = null
   #log
   #flow
   /** Guards addSubscription so only the first consumer attempts it. */
   #subscriptionClaimed = false
+  /** Set while the pre-flight drain is running, so disconnect can abort it. */
+  #cancelDrain = null
 
   constructor({ log, flow }) {
     this.#log = log
@@ -99,6 +114,16 @@ export class SolaceConsumers {
 
   get connected() {
     return this.status === 'connected'
+  }
+
+  /** The queue is being emptied of its pre-existing backlog; nothing is bound yet. */
+  get draining() {
+    return this.status === 'draining'
+  }
+
+  /** True from the moment connect() is called until disconnect(), drain included. */
+  get busy() {
+    return this.status === 'connecting' || this.status === 'draining' || this.status === 'connected'
   }
 
   get totalReceived() {
@@ -114,6 +139,7 @@ export class SolaceConsumers {
     this.error = null
     this.subscriptionAdded = false
     this.#subscriptionClaimed = false
+    this.drainedCount = 0
 
     const { url, vpnName, userName, password } = this.config
     this.#log.info('solace', `Connecting session to ${url} (vpn "${vpnName}")`)
@@ -138,10 +164,22 @@ export class SolaceConsumers {
 
     this.#session = session
 
-    session.on(solace.SessionEventCode.UP_NOTICE, () => {
-      this.status = 'connected'
+    session.on(solace.SessionEventCode.UP_NOTICE, async () => {
       this.error = null
       this.#log.ok('solace', 'Session up')
+
+      // Empty the queue before a single demo consumer is bound, so the animation
+      // starts from a known-empty state.
+      if (this.config.drainOnConnect) {
+        this.status = 'draining'
+        await this.#drain()
+        // The user may have hit Disconnect, or the session may have gone down,
+        // while the drain was running. Either way this connect attempt is over,
+        // and binding consumers now would resurrect a dead one.
+        if (this.#session !== session || this.status !== 'draining') return
+      }
+
+      this.status = 'connected'
       // Verified against a real broker: on a *partitioned* queue nothing is
       // delivered until the broker has assigned partitions to the newly-joined
       // consumers, which takes up to the queue's partition rebalance delay
@@ -165,6 +203,7 @@ export class SolaceConsumers {
     session.on(solace.SessionEventCode.DISCONNECTED, () => {
       this.status = 'disconnected'
       this.#log.info('solace', 'Session disconnected')
+      this.#cancelDrain?.()
       this.#disposeAll()
       if (this.#session) {
         this.#session.dispose()
@@ -176,6 +215,7 @@ export class SolaceConsumers {
       this.status = 'error'
       this.error = describe(e)
       this.#log.error('solace', `Session down: ${describe(e)}`)
+      this.#cancelDrain?.()
     })
 
     try {
@@ -188,6 +228,7 @@ export class SolaceConsumers {
   }
 
   disconnect() {
+    this.#cancelDrain?.()
     this.#disposeAll()
     const session = this.#session
     this.#session = null
@@ -383,6 +424,135 @@ export class SolaceConsumers {
   }
 
   // ----------------------------------------------------------------- internal
+
+  /**
+   * Consume and acknowledge everything already spooled on the queue, before a
+   * single demo consumer is bound.
+   *
+   * A queue that survived a previous run almost always still holds messages, and
+   * the demo consumers would be handed that backlog the instant they come up: the
+   * flow layer fills with cards for messages nobody published in this session,
+   * every one of them tagged "already on queue", and the load-balancing story the
+   * demo exists to tell is buried under a burst of animation before the first
+   * publish. So a single throwaway consumer eats the backlog first — a large flow
+   * window, no processing delay, nothing registered with the flow store.
+   *
+   * Draining is best effort. If the consumer cannot bind (missing queue, denied
+   * permission, guaranteed messaging off) we log it, hint at the cause, and let
+   * the normal bind attempt fail in the same way it always would — that path
+   * already reports itself per consumer, and swallowing the connect here would
+   * only hide it.
+   */
+  #drain() {
+    return new Promise((resolve) => {
+      const queueName = this.config.queueName
+      this.#log.info('solace', `Draining any backlog on "${queueName}" before binding consumers`)
+
+      let raw
+      try {
+        raw = this.#session.createMessageConsumer({
+          queueDescriptor: { name: queueName, type: solace.QueueType.QUEUE, durable: true },
+          acknowledgeMode: solace.MessageConsumerAcknowledgeMode.CLIENT,
+          createIfMissing: false,
+          windowSize: DRAIN_WINDOW,
+        })
+      } catch (e) {
+        this.#log.error('solace', `Could not create the drain consumer: ${e.message}`)
+        resolve()
+        return
+      }
+
+      let quiet = null
+      let ceiling = null
+      let settled = false
+
+      const finish = (summary) => {
+        if (settled) return
+        settled = true
+        clearTimeout(quiet)
+        clearTimeout(ceiling)
+        this.#cancelDrain = null
+        try {
+          raw.disconnect()
+        } catch {
+          /* may never have come up */
+        }
+        try {
+          raw.dispose()
+        } catch {
+          /* already disposed */
+        }
+        if (summary) this.#log[summary.level]('solace', summary.message)
+        // Cards resting at the queue node were published before we bound, so the
+        // drain just consumed them. Leaving them on screen would claim they are
+        // still waiting for a consumer that will never see them.
+        if (this.drainedCount > 0) this.#flow.clearPending()
+        resolve()
+      }
+
+      // Each delivery pushes the finish line back; a quiet window means empty.
+      const bumpQuiet = () => {
+        clearTimeout(quiet)
+        quiet = setTimeout(() => {
+          finish({
+            level: this.drainedCount > 0 ? 'ok' : 'info',
+            message: this.drainedCount
+              ? `Drained ${this.drainedCount} message${this.drainedCount === 1 ? '' : 's'} from "${queueName}" — starting from an empty queue`
+              : `Queue "${queueName}" was already empty`,
+          })
+        }, DRAIN_QUIET_MS)
+      }
+
+      raw.on(solace.MessageConsumerEventName.UP, bumpQuiet)
+
+      raw.on(solace.MessageConsumerEventName.MESSAGE, (message) => {
+        this.drainedCount++
+        try {
+          message.acknowledge()
+        } catch (e) {
+          this.#log.error('solace', `Drain acknowledge() failed: ${e.message}`)
+        }
+        bumpQuiet()
+      })
+
+      raw.on(solace.MessageConsumerEventName.CONNECT_FAILED_ERROR, (e) => {
+        this.#log.error('solace', `Drain consumer could not bind: ${describe(e)}`)
+        this.#hintForSubcode(e)
+        finish(null)
+      })
+
+      raw.on(solace.MessageConsumerEventName.DOWN_ERROR, (e) => {
+        this.#log.error('solace', `Drain consumer down: ${describe(e)}`)
+        finish(null)
+      })
+
+      raw.on(solace.MessageConsumerEventName.GM_DISABLED, () => {
+        finish({
+          level: 'error',
+          message:
+            'Guaranteed messaging is disabled on the message VPN — the queue cannot be bound, so there is nothing to drain.',
+        })
+      })
+
+      this.#cancelDrain = () => finish({ level: 'info', message: 'Drain cancelled' })
+
+      try {
+        raw.connect()
+      } catch (e) {
+        this.#log.error('solace', `Drain consumer connect() threw: ${e.message}`)
+        finish(null)
+      }
+
+      // A queue that someone else is actively publishing to never goes quiet.
+      // Give up rather than hold the demo hostage to it.
+      ceiling = setTimeout(() => {
+        finish({
+          level: 'warn',
+          message: `Still receiving after ${DRAIN_MAX_MS / 1000}s — "${queueName}" is being published to from elsewhere. Binding consumers now; ${this.drainedCount} message${this.drainedCount === 1 ? '' : 's'} drained so far.`,
+        })
+      }, DRAIN_MAX_MS)
+    })
+  }
 
   /**
    * Map the MQTT topic onto the queue exactly once. Every consumer binding to

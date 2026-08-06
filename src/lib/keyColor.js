@@ -7,8 +7,14 @@
  * always produces the same hue, across reloads and across consumers.
  */
 
-/** FNV-1a, 32-bit. Small, fast, and well spread for short ASCII keys. */
-function hash(str) {
+/**
+ * FNV-1a, 32-bit. Small, fast, and well spread for short ASCII keys.
+ *
+ * Exported because the comparison tab needs to derive a *partition* from a key
+ * as well as a colour, and both have the same requirement: the same key must
+ * always produce the same answer.
+ */
+export function fnv1a(str) {
   let h = 0x811c9dc5
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i)
@@ -27,7 +33,7 @@ export function keyColor(key) {
     // to a random partition, so pretending they have an identity would be a lie.
     return { h: 0, s: 0, l: 62 }
   }
-  const h = (hash(key) * 137.508) % 360
+  const h = (fnv1a(key) * 137.508) % 360
   return { h, s: 68, l: 60 }
 }
 

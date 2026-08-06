@@ -10,7 +10,9 @@
   // Deeply-reactive $state object; its properties are safe to bind into.
   let cfg = $derived(consumers.config)
 
-  let locked = $derived(consumers.status === 'connected' || consumers.status === 'connecting')
+  // Everything from "Connect" onwards, drain included — the connection fields must
+  // not change under a session that is already using them.
+  let locked = $derived(consumers.busy)
   let total = $derived(consumers.totalReceived)
 
   // Collapse the connection form once we're up. It is tall enough to push the
@@ -105,6 +107,20 @@
           mono
         />
 
+        <label class="flex items-start gap-2 text-[11px] text-slate-400">
+          <input
+            type="checkbox"
+            bind:checked={cfg.drainOnConnect}
+            disabled={locked}
+            class="mt-0.5 accent-emerald-500"
+          />
+          <span>
+            Drain the queue before binding. A leftover backlog from an earlier run would otherwise be
+            delivered the moment the consumers come up, flooding the animation before the first
+            publish. Untick to see the real backlog arrive instead.
+          </span>
+        </label>
+
         <div class="space-y-1">
           <Field
             label="Flow window size"
@@ -132,8 +148,17 @@
         </p>
       {/if}
 
+      {#if consumers.draining}
+        <p
+          class="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-300"
+        >
+          Draining "{cfg.queueName}" before binding consumers —
+          {consumers.drainedCount} message{consumers.drainedCount === 1 ? '' : 's'} discarded so far.
+        </p>
+      {/if}
+
       <div class="flex gap-2">
-        {#if consumers.connected || consumers.status === 'connecting'}
+        {#if consumers.busy}
           <button
             onclick={() => consumers.disconnect()}
             class="flex-1 rounded-md border border-ink-700 bg-ink-850 px-3 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
@@ -211,9 +236,13 @@
         <p
           class="rounded-lg border border-dashed border-ink-800 px-3 py-6 text-center text-[11px] text-slate-600"
         >
-          {consumers.connected
-            ? 'No consumers bound. Use + to add one.'
-            : 'Connect to bind consumers to the queue.'}
+          {#if consumers.connected}
+            No consumers bound. Use + to add one.
+          {:else if consumers.draining}
+            Draining the queue — consumers bind once it is empty.
+          {:else}
+            Connect to bind consumers to the queue.
+          {/if}
         </p>
       {/each}
     </div>

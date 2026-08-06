@@ -34,6 +34,70 @@ Add a **partitioned** queue and you also get per-key ordering affinity: every me
 same partition key is handled by the same consumer, so you can scale out without losing per-entity
 ordering.
 
+## The two tabs
+
+| Tab | What it is |
+|---|---|
+| **Live demo** | Real clients against a real broker. Every card moves because an mqtt.js or solclientjs callback fired. |
+| **Why this pattern** | The argument against a broker that does MQTT QoS 1 shared subscriptions natively. A model, not a client — and it says so on screen. |
+
+The comparison tab exists because "use a partitioned queue" invites the obvious objection: EMQX and
+HiveMQ support shared subscriptions at QoS 1, so what is missing? The answer is not the delivery
+guarantee. It is **what the broker is allowed to route on**:
+
+```
+MQTT shared subscription   consumer  = f(publisher identity)  or  f(topic string)
+Solace partitioned queue   partition = hash(partition key) MOD partitionCount
+```
+
+This tab is customer-facing, so it is built to survive someone who knows the other product:
+
+- **Every claim is sourced.** Each row in `src/lib/comparison.js` carries the vendor doc pages it
+  came from, and the tab renders them as links per row plus a combined Sources footer. Where a claim
+  comes from this repo's own broker run rather than a doc, it says so.
+- **The MQTT side is not a straw man.** All five dispatch strategies are selectable and are the real
+  documented ones: `round_robin` (EMQX default), `random` (HiveMQ's behaviour), `sticky`,
+  `hash_clientid` and `hash_topic`. Pick `hash_topic` and the MQTT side earns the same
+  *"every key on exactly one consumer"* verdict Solace does — because with the key in the topic, it
+  genuinely gets there. The panel then shows what that costs.
+- **Rows where Solace loses or draws are first-class.** End-to-end protocol is an MQTT edge.
+  Delivery guarantee and consumer visibility are draws. Per-key ordering during a rebalance is
+  marked a **Solace limit**, quoting Solace's own statement that "a key sequence can therefore split
+  across consumers" mid-handoff.
+- **Verdicts are stated, not implied.** The scoreboard is computed from the rows, so it cannot drift.
+
+Both routing models live in `src/lib/affinitySim.svelte.js` and are driven side by side from one set
+of controls, so the two sides can only diverge because the rule diverged. What the panel shows is
+derived from the rules, not scripted — including two numbers worth knowing:
+
+| Scaling 3 → 4 consumers | Key mappings that move |
+|---|---|
+| EMQX `hash_topic` (modulo over subscriber count) | 3 of 4, immediately, no handoff |
+| Solace partitioned queue (formal rebalance) | 1 of 4, after the rebalance delay |
+
+Both models can also strand a consumer, and the difference is what you can do about it: on a shared
+subscription the ceiling is the number of publishers or distinct topics — application shape — while
+on a partitioned queue it is the partition count, which is broker config, though Solace documents
+changing it as service-affecting. Scale past either and consumers are labelled **unreachable** with
+the reason.
+
+### What validating the claims changed
+
+Worth recording, because most of these were plausible and wrong:
+
+| Claim | What the docs actually say |
+|---|---|
+| "First-party KEDA scaler merged into KEDA" | `solace-event-queue` is in the official catalog but is **community**-maintained. (The competitive half got *stronger*: KEDA has no MQTT, EMQX, HiveMQ or Mosquitto scaler at all.) |
+| "Loses messages on cluster split; declared shared subs required for durability" | Not supported by either vendor's docs. HiveMQ's *declared* shared subscriptions are about enqueueing **when no subscriber is connected**, not split-brain. Row reframed to that. |
+| "Consumer receives its assigned partition set in the bind response" | True on the wire, but the API uses it internally for reconnect continuity — the application "has no knowledge of which partition a message was delivered from". Downgraded from a Solace edge to a draw. |
+| "No mechanism to route two publishers' messages for the same key to one consumer" | EMQX `hash_topic` does exactly that if the key is in the topic. Now a selectable strategy and its own row. |
+| "Keyed on publisher ClientID or session-random" | EMQX-specific. HiveMQ has no keyed option at all — it "distributes the messages randomly". |
+| "QoS 1/2 supported" | EMQX yes; HiveMQ downgrades QoS 2 to QoS 1 inside a shared subscription. |
+| Partition key is `QUEUE_PARTITION_KEY` | Solace documents MQTT 5 publishers using `JMSXGroupID`. This repo separately verified `QUEUE_PARTITION_KEY` works; the tab states both and which is which. |
+
+Vendor docs were checked in August 2026. Re-check before reusing this in front of anyone — and note
+that EMQX and HiveMQ differ from each other on several rows, so "MQTT" is not one behaviour.
+
 ## Quick start
 
 ```bash
@@ -242,12 +306,14 @@ rendered, entering at the queue node and tagged, so nothing real is dropped from
 
 ```
 src/
-  App.svelte                     config | stage | config layout; owns the stores
+  App.svelte                     tab bar; config | stage | config layout; owns the stores
   lib/
     mqttPublisher.svelte.js      MQTT 5 client, QoS 1 publish with user properties
     solaceConsumers.svelte.js    session + N MessageConsumers, queue bind, client ack
     flow.svelte.js               in-flight packet registry and phase machine
     anchors.js                   element registry, so lines and cards use real DOM boxes
+    affinitySim.svelte.js        ─┐ comparison tab: the two routing rules,
+    comparison.js                ─┘ and the nine dimensions with their verdicts
     keyColor.js  persist.js  log.svelte.js
   components/
     PublisherNode.svelte         ─┐
@@ -258,9 +324,26 @@ src/
     MqttPanel.svelte             ─┐
     SolacePanel.svelte            ├─ configuration only, no animation anchors
     ConsumerControls.svelte      ─┘
+    ComparisonTab.svelte         ─┐
+    AffinityLab.svelte            ├─ the "Why this pattern" tab
+    AffinityPanel.svelte          │  one panel per routing rule
+    DimensionCard.svelte         ─┘
     Field.svelte  StatusDot.svelte  LogPanel.svelte
 verify-interop.mjs               headless proof of the interop, no browser needed
 ```
+
+The comparison tab's diagram is positioned from **fixed percentages**, not measured DOM boxes: its
+layout is static, so percentages survive a resize for free and it needs no animation frame loop.
+That is the opposite trade to `FlowLayer`, whose nodes genuinely move under it. It also means `left`
+and `top` are safe to hand to a CSS transition, which is why `.sim-chip` has one and `.packet`
+deliberately does not.
+
+Switching to the comparison tab **hides** the demo rather than unmounting it, so a live session and
+any cards in flight survive the trip. `AnchorRegistry.box()` already returns null for a zero-size
+element and `FlowLayer` holds a card's last position rather than snapping it to the origin, so a
+message that arrives while you are reading the comparison is simply waiting where it should be when
+you come back. The comparison tab has no connection behind it and is mounted on demand, so its
+timers stop the moment you leave it.
 
 Svelte 5 (runes) · Tailwind 4 · Vite 8 · mqtt.js 5 · solclientjs 10.
 

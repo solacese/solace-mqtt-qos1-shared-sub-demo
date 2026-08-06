@@ -5,7 +5,10 @@
 
   // Configuration only — the publisher's representation on the flow stage is
   // PublisherNode, so this panel owns no animation anchor.
-  let { publisher } = $props()
+  // `blockedReason`, when set, holds publishing back for a reason that belongs to
+  // the other side of the demo — the Solace pre-flight drain would consume the
+  // message before any consumer the user can see gets to.
+  let { publisher, blockedReason = null } = $props()
 
   // `config` is a deeply-reactive $state object. Binding into its properties is
   // fine — only reassigning `cfg` itself would not be.
@@ -181,10 +184,10 @@
   <footer class="space-y-2 border-t border-ink-800 px-4 py-3">
     <button
       onclick={() => publisher.publish()}
-      disabled={!publisher.connected}
+      disabled={!publisher.connected || !!blockedReason}
       class="w-full rounded-md bg-mqtt px-3 py-2.5 text-sm font-semibold text-ink-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-ink-800 disabled:text-slate-500"
     >
-      Publish QoS 1 message
+      {blockedReason && publisher.connected ? blockedReason : 'Publish QoS 1 message'}
     </button>
     <div class="flex justify-between text-[11px] text-slate-500">
       <span>{publisher.publishedCount} PUBACKed</span>
