@@ -81,7 +81,7 @@ export const STRATEGIES = {
     vendor: 'EMQX option',
     rule: 'consumer = hash(topic) MOD n',
     affinity: 'key',
-    note: 'The real counter-argument, and it works: the key is in the topic, so every message for that key reaches one subscriber. The costs are that the key must live in the topic string, affinity is per topic rather than per key, and the mapping is a plain modulo over the live subscriber count — so scaling re-routes most topics at once, with no handoff.',
+    note: 'Reaches per-key affinity by hashing the topic, so it depends on the key having been promoted into the topic string. Affinity is per topic rather than per key, and the mapping is a plain modulo over the live subscriber count — so scaling re-routes most topics at once, with no handoff.',
   },
 }
 

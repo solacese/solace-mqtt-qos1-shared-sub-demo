@@ -21,8 +21,10 @@ The middle is a **pure visualisation**: the publisher, the queue and each consum
 joined by the lines that messages actually travel along. All configuration lives in the flanking
 panels, so nothing on the stage moves or resizes while you are watching a message cross it.
 
-Colour-coded cards ride those lines, driven by real client callbacks — nothing on screen is on a timer
-pretending to be a broker.
+Colour-coded cards ride those lines. Connect a broker and every phase transition comes from a real
+mqtt.js or solclientjs callback — nothing is on a timer pretending to be a broker. Before you connect
+one, **demo mode** simulates the transport so the page is not an empty stage, and says so in a banner
+rather than letting you mistake it for live traffic.
 
 ## Why this demo exists
 
@@ -38,7 +40,7 @@ ordering.
 
 | Tab | What it is |
 |---|---|
-| **Live demo** | Real clients against a real broker. Every card moves because an mqtt.js or solclientjs callback fired. |
+| **Live demo** | Real clients against a real broker: every card moves because an mqtt.js or solclientjs callback fired. Until you connect one, demo mode simulates the transport — labelled as such in a banner. |
 | **Why this pattern** | The argument against a broker that does MQTT QoS 1 shared subscriptions natively. A model, not a client — and it says so on screen. |
 
 The comparison tab exists because "use a partitioned queue" invites the obvious objection: EMQX and
@@ -60,11 +62,15 @@ This tab is customer-facing, so it is built to survive someone who knows the oth
   `hash_clientid` and `hash_topic`. Pick `hash_topic` and the MQTT side earns the same
   *"every key on exactly one consumer"* verdict Solace does — because with the key in the topic, it
   genuinely gets there. The panel then shows what that costs.
-- **Rows where Solace loses or draws are first-class.** End-to-end protocol is an MQTT edge.
-  Delivery guarantee and consumer visibility are draws. Per-key ordering during a rebalance is
-  marked a **Solace limit**, quoting Solace's own statement that "a key sequence can therefore split
-  across consumers" mid-handoff.
+- **Rows where Solace loses or draws are first-class.** End-to-end protocol is an MQTT edge, admin
+  overhead is a trade-off, and delivery guarantee and consumer visibility are draws.
+- **Verdicts are comparative, not absolute** — which product is better on that dimension. A Solace
+  edge can still carry a documented limitation, and where it does the limitation is stated in full:
+  the rebalance-ordering row is a Solace edge because Solace bounds the exposure with a handoff
+  window and an ack timer where a shared subscription does not bound it at all, and the row still
+  quotes Solace's own "a key sequence can therefore split across consumers".
 - **Verdicts are stated, not implied.** The scoreboard is computed from the rows, so it cannot drift.
+  It currently reads 8 Solace edge · 2 Even · 1 Trade-off · 1 MQTT edge.
 
 Both routing models live in `src/lib/affinitySim.svelte.js` and are driven side by side from one set
 of controls, so the two sides can only diverge because the rule diverged. What the panel shows is
@@ -105,7 +111,30 @@ npm install
 npm run dev          # then open the printed URL
 ```
 
-You need a Solace broker. Locally:
+**No broker needed to look around.** The app opens in **demo mode**, which is on by default: three
+consumers are bound, a message is published every 1.7s, and the cards flow. An amber banner says so,
+next to a prominent link to the comparison tab.
+
+What is simulated is deliberately narrow — the transport and the acknowledgement. Everything the demo
+is actually about still runs for real: the key rotation, the topic template, the MQTT 5 user
+properties, the flow phase machine, the per-consumer work delay, pausing a consumer holding its
+message unacked, and the partition routing rule itself. A simulated delivery joins the *same*
+`#accept` path a real broker message takes, so there is one code path rather than a parallel fake one.
+
+The banner switches between the two queue behaviours without a broker, which is the fastest way to see
+the contrast this whole demo exists for:
+
+| Mode | Rule | What you see |
+|---|---|---|
+| `partitioned` | `partition = key-hash MOD 4`, one partition per consumer | Each key sticks to one consumer; the *keys seen* chips stay disjoint |
+| `non-exclusive` | Next available consumer takes the message | Keys scatter; every consumer accumulates every key |
+
+Clicking **Connect** on either panel tears the simulation down automatically — `connect()` calls
+`exitSimulated()`, and demo mode's `enabled` is derived from those flags rather than tracked
+separately, so the two cannot get out of step. "Use a real broker" in the banner does the same thing
+explicitly.
+
+To run it against a real broker:
 
 ```bash
 docker run -d --name=solace --shm-size=2g \
@@ -312,8 +341,9 @@ src/
     solaceConsumers.svelte.js    session + N MessageConsumers, queue bind, client ack
     flow.svelte.js               in-flight packet registry and phase machine
     anchors.js                   element registry, so lines and cards use real DOM boxes
+    demoMode.svelte.js           broker-free demo mode: routing rule + auto-publish
     affinitySim.svelte.js        ─┐ comparison tab: the two routing rules,
-    comparison.js                ─┘ and the nine dimensions with their verdicts
+    comparison.js                ─┘ and the twelve dimensions with their verdicts
     keyColor.js  persist.js  log.svelte.js
   components/
     PublisherNode.svelte         ─┐
@@ -324,6 +354,7 @@ src/
     MqttPanel.svelte             ─┐
     SolacePanel.svelte            ├─ configuration only, no animation anchors
     ConsumerControls.svelte      ─┘
+    DemoBanner.svelte            demo-mode notice + the comparison-tab link
     ComparisonTab.svelte         ─┐
     AffinityLab.svelte            ├─ the "Why this pattern" tab
     AffinityPanel.svelte          │  one panel per routing rule

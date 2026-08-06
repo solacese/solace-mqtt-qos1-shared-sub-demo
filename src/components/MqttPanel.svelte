@@ -8,7 +8,9 @@
   // `blockedReason`, when set, holds publishing back for a reason that belongs to
   // the other side of the demo — the Solace pre-flight drain would consume the
   // message before any consumer the user can see gets to.
-  let { publisher, blockedReason = null } = $props()
+  // `onPublish` lets the owner route the click — demo mode needs the publish and
+  // the simulated delivery to stay together, so it cannot just call publish().
+  let { publisher, blockedReason = null, onPublish = null } = $props()
 
   // `config` is a deeply-reactive $state object. Binding into its properties is
   // fine — only reassigning `cfg` itself would not be.
@@ -183,7 +185,7 @@
 
   <footer class="space-y-2 border-t border-ink-800 px-4 py-3">
     <button
-      onclick={() => publisher.publish()}
+      onclick={() => (onPublish ? onPublish() : publisher.publish())}
       disabled={!publisher.connected || !!blockedReason}
       class="w-full rounded-md bg-mqtt px-3 py-2.5 text-sm font-semibold text-ink-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-ink-800 disabled:text-slate-500"
     >

@@ -99,6 +99,14 @@ export class SolaceConsumers {
   /** Messages discarded by the pre-flight drain, for the UI to show. */
   drainedCount = $state(0)
 
+  /**
+   * Demo mode: consumers exist in memory only, with no solclientjs flow behind
+   * them. Deliveries arrive via `deliverSimulated` and join the same path a real
+   * message takes, so pause, work delay, key colouring and the phase machine are
+   * all genuine. Only the transport is fabricated.
+   */
+  simulated = $state(false)
+
   #session = null
   #log
   #flow
@@ -132,7 +140,40 @@ export class SolaceConsumers {
 
   // ---------------------------------------------------------------- session
 
+  /**
+   * Bring consumers up without a broker. No drain: there is no spool to empty,
+   * and pretending to drain one would be theatre.
+   */
+  connectSimulated() {
+    if (this.#session) this.disconnect()
+    this.simulated = true
+    this.status = 'connected'
+    this.error = null
+    this.drainedCount = 0
+    this.subscriptionAdded = false
+    this.consumers = []
+    // Captured first: addConsumer writes config.consumerCount, so reading it as
+    // the loop bound would stop after one.
+    const target = Math.max(1, this.config.consumerCount)
+    for (let i = 0; i < target; i++) this.addConsumer(false)
+    this.#log.info(
+      'solace',
+      `Demo mode — ${this.consumers.length} simulated consumers, no Solace broker is involved`
+    )
+  }
+
+  /** Drop simulated state so a real connection can take over. */
+  exitSimulated() {
+    if (!this.simulated) return
+    this.simulated = false
+    for (const c of this.consumers) this.#flow.consumerGone(c.id)
+    this.consumers = []
+    this.status = 'disconnected'
+  }
+
   async connect() {
+    // A real session always wins over the simulation.
+    this.exitSimulated()
     if (this.#session) this.disconnect()
     save('solace', this.config)
     this.status = 'connecting'
@@ -258,13 +299,25 @@ export class SolaceConsumers {
   }
 
   addConsumer(announceRebalance = true) {
-    if (!this.#session || this.status !== 'connected') {
+    if (!this.simulated && (!this.#session || this.status !== 'connected')) {
       this.#log.warn('solace', 'Session is not up — cannot bind a consumer')
       return
     }
 
     const id = `c-${++consumerSeq}`
     const consumer = new Consumer(id, `Consumer ${this.consumers.length + 1}`, this.config.processingDelayMs)
+
+    if (this.simulated) {
+      // No flow to create, so it is up immediately. Demo mode's router decides
+      // what reaches it.
+      consumer.state = 'up'
+      this.consumers.push(consumer)
+      this.config.consumerCount = this.consumers.length
+      if (announceRebalance && this.consumers.length > 1) {
+        this.#log.info('solace', `${consumer.label} bound (simulated) — partitions rebalance`)
+      }
+      return
+    }
 
     let raw
     try {
@@ -578,6 +631,34 @@ export class SolaceConsumers {
     }
   }
 
+  /**
+   * A simulated delivery, from demo mode rather than from a broker.
+   *
+   * It joins the *same* path a real message takes — `#accept` below — so the
+   * phase machine, the key colouring, the pause/hold behaviour and the work
+   * delay are the genuine ones. Only the transport and the acknowledgement are
+   * fabricated.
+   */
+  deliverSimulated(consumerId, { id, key, topic, payload, userProperties }) {
+    const consumer = this.consumers.find((c) => c.id === consumerId)
+    if (!consumer) return
+    this.#accept(
+      consumer,
+      {
+        id,
+        key,
+        topic,
+        bodyText: payload,
+        userProperties,
+        propertyKeyPresent: key != null,
+        redelivered: false,
+      },
+      // Nothing to acknowledge to. The flow store is still told, so the card
+      // completes on the consumer's real work delay.
+      () => {}
+    )
+  }
+
   #onMessage(consumer, message) {
     const payload = readPayload(message)
     const userProperties = readUserProperties(message)
@@ -600,13 +681,35 @@ export class SolaceConsumers {
       )
     }
 
+    this.#accept(
+      consumer,
+      {
+        id,
+        key,
+        topic,
+        bodyText: payload.text,
+        userProperties,
+        propertyKeyPresent: propKey !== undefined,
+        redelivered,
+      },
+      () => message.acknowledge()
+    )
+  }
+
+  /**
+   * Everything that happens once a message is in hand, regardless of how it got
+   * here: record it on the consumer, register it with the flow store, run the
+   * simulated work delay, then acknowledge — or hold it unacked if the consumer
+   * is paused, which is the honest depiction of a stalled worker.
+   */
+  #accept(consumer, { id, key, topic, bodyText, userProperties, propertyKeyPresent, redelivered }, ackFn) {
     consumer.noteMessage(key)
     consumer.lastMessage = {
       topic,
       key,
-      propertyKeyPresent: propKey !== undefined,
+      propertyKeyPresent,
       userProperties,
-      body: payload.text,
+      body: bodyText,
       redelivered,
       receivedAt: new Date().toLocaleTimeString(),
     }
@@ -615,8 +718,8 @@ export class SolaceConsumers {
       id,
       key,
       topic,
-      payload: payload.text,
-      size: payload.text.length,
+      payload: bodyText,
+      size: bodyText.length,
       consumerId: consumer.id,
       redelivered,
       userProperties,
@@ -624,12 +727,12 @@ export class SolaceConsumers {
 
     this.#log.info(
       'solace',
-      `${consumer.label} received ${topic}${key ? ` [key=${key}]` : ''}${redelivered ? ' (redelivered)' : ''}`
+      `${consumer.label} received ${topic}${key ? ` [key=${key}]` : ''}${redelivered ? ' (redelivered)' : ''}${this.simulated ? ' (simulated)' : ''}`
     )
 
     const ack = () => {
       try {
-        message.acknowledge()
+        ackFn()
         this.#flow.completed(packet.id)
       } catch (e) {
         this.#log.error('solace', `acknowledge() failed: ${e.message}`)

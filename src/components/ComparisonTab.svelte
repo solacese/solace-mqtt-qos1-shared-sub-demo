@@ -6,7 +6,7 @@
   let { onOpenDemo } = $props()
 
   const counts = tally()
-  const order = ['solace', 'mqtt', 'even', 'tradeoff', 'limit']
+  const order = ['solace', 'mqtt', 'even', 'tradeoff']
   const CHECKED = 'August 2026'
 
   let byGroup = $derived(
@@ -38,10 +38,12 @@
         the ceiling on useful consumers all follow from that.
       </p>
       <p class="mt-2 max-w-4xl text-[11px] leading-relaxed text-slate-500">
-        EMQX's <span class="font-mono text-slate-400">hash_topic</span> is the strongest objection to
-        all of this, and it is in the panel below rather than left out — select it and the MQTT side
-        starts sticking keys to consumers correctly. What it costs is in the
-        <span class="text-slate-400">Delivery &amp; routing</span> rows.
+        What that buys you: <span class="text-slate-300">scale out without losing per-entity
+        ordering</span>, with the routing key as an ordinary message property — so the topic taxonomy
+        stays free to model the domain, the publisher needs no changes, and the affinity survives
+        publisher reconnects, consumer reconnects and scaling events without a line of application
+        state management. The shared-subscription equivalents get part of the way there, and the rows
+        below are where each one stops.
       </p>
 
       <div class="mt-3 flex flex-wrap items-center gap-2">

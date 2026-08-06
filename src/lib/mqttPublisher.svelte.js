@@ -32,6 +32,14 @@ export class MqttPublisher {
   publishedCount = $state(0)
   lastKey = $state(null)
 
+  /**
+   * Demo mode: no mqtt.js client, no broker. Everything else — the key rotation,
+   * the topic template, the payload, the user properties, the flow phases — runs
+   * exactly as it does for real, so what you see is the real shape of the thing
+   * with a fabricated transport underneath. The UI labels it, loudly.
+   */
+  simulated = $state(false)
+
   #client = null
   #keyIndex = 0
   #log
@@ -54,7 +62,26 @@ export class MqttPublisher {
       .filter(Boolean)
   }
 
+  /** Come up without a broker. */
+  connectSimulated() {
+    if (this.#client) this.disconnect()
+    this.simulated = true
+    this.status = 'connected'
+    this.error = null
+    this.#log.info('mqtt', 'Demo mode — publishing is simulated, no MQTT broker is involved')
+  }
+
+  /** Drop simulated state so a real connection can take over. */
+  exitSimulated() {
+    if (!this.simulated) return
+    this.simulated = false
+    this.status = 'disconnected'
+    this.publishedCount = 0
+  }
+
   connect() {
+    // A real connection always wins over the simulation.
+    this.exitSimulated()
     if (this.#client) this.disconnect()
     save('mqtt', this.config)
     this.status = 'connecting'
@@ -145,7 +172,7 @@ export class MqttPublisher {
    * null if we weren't in a position to publish.
    */
   publish() {
-    if (!this.#client || this.status !== 'connected') {
+    if (!this.simulated && (!this.#client || this.status !== 'connected')) {
       this.#log.warn('mqtt', 'Not connected — nothing published')
       return null
     }
@@ -179,6 +206,21 @@ export class MqttPublisher {
       payload: body,
       size: body.length,
     })
+
+    if (this.simulated) {
+      // Stand in for the PUBACK. A real one on localhost lands in about a
+      // millisecond; a beat of latency here is what makes the card visibly
+      // travel rather than teleport.
+      setTimeout(() => {
+        this.publishedCount++
+        this.#flow.acked(id)
+      }, 90)
+      this.#log.info(
+        'mqtt',
+        `PUBLISH qos1 ${topic}${key ? ` [${this.config.partitionKeyProperty}=${key}]` : ' (no partition key)'} (simulated)`
+      )
+      return packet
+    }
 
     this.#client.publish(
       topic,

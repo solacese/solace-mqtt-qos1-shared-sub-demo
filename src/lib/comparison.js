@@ -14,9 +14,12 @@
  *
  * Deliberate choices about tone:
  *  - `verdict` is stated, not implied by giving one column the longer sentence.
- *  - Rows where the competition wins, draws, or where Solace has a documented
- *    limit are in here as first-class rows. A comparison that only lists wins is
- *    a pitch, and a customer reads it as one.
+ *  - Verdicts are comparative — which product is better on that dimension — not
+ *    absolute. A Solace edge can still carry a documented limitation, and where
+ *    it does, the limitation is stated in full in the prose (see
+ *    `handoff-ordering`, which quotes Solace on key sequences splitting).
+ *  - Rows where the competition wins or draws stay in as first-class rows. A
+ *    comparison that only lists wins is a pitch, and a customer reads it as one.
  */
 
 /** Every page a claim on this tab came from. */
@@ -84,11 +87,6 @@ export const VERDICTS = {
     chip: 'bg-amber-500/15 text-amber-300 ring-amber-500/40',
     rail: 'bg-amber-500/50',
   },
-  limit: {
-    label: 'Solace limit',
-    chip: 'bg-rose-500/15 text-rose-300 ring-rose-500/40',
-    rail: 'bg-rose-500/50',
-  },
 }
 
 export const GROUPS = [
@@ -105,15 +103,6 @@ export const GROUPS = [
  */
 export const DIMENSIONS = [
   {
-    id: 'qos',
-    group: 'routing',
-    dimension: 'QoS / delivery guarantee',
-    verdict: 'even',
-    solace: 'MQTT QoS 1 maps to Guaranteed messaging: the message spools and the broker redelivers it until it is acknowledged. Verified against a real broker in this repo.',
-    mqtt: 'Genuine guaranteed delivery, and a real strength. EMQX supports shared subscriptions at QoS 1 and 2. HiveMQ downgrades QoS 2 to QoS 1 inside a shared subscription — "Shared subscriptions with QoS 2 are automatically downgraded to QoS 1" — but QoS 1 is fully supported.',
-    sources: ['emqx', 'hivemq', 'repo'],
-  },
-  {
     id: 'routing-key',
     group: 'routing',
     dimension: 'What the routing decision is made on',
@@ -128,12 +117,24 @@ export const DIMENSIONS = [
     id: 'hash-topic',
     group: 'routing',
     dimension: 'Getting per-key affinity out of topic hashing',
-    verdict: 'tradeoff',
+    // hash_topic reaches per-key affinity, so the comparison is not whether it
+    // works but what reaching it costs: a topic taxonomy built around routing,
+    // and 3 of 4 mappings moving per scaling event against Solace's 1 of 4.
+    verdict: 'solace',
     sim: 'strategy',
     solace:
       'Not needed, so the topic taxonomy stays free to model the domain rather than the routing. The key is a property of the message.',
-    mqtt: 'This is the honest counter-argument, and it works: put the key in the topic and EMQX hash_topic routes every message for that key to one subscriber. Try it in the panel above. What it costs is that the key must be promoted into the topic string, affinity is per topic rather than per key, and the assignment is a plain modulo over the current subscriber count — so scaling re-routes most topics at once, with no handoff. HiveMQ has no equivalent option.',
+    mqtt: 'EMQX hash_topic reaches per-key affinity, at the cost of building the topic taxonomy around routing: the key must be promoted into the topic string, affinity is per topic rather than per key, and the assignment is a plain modulo over the current subscriber count — so scaling re-routes most topics at once, with no handoff. HiveMQ has no equivalent option.',
     sources: ['emqx', 'hivemq'],
+  },
+  {
+    id: 'qos',
+    group: 'routing',
+    dimension: 'QoS / delivery guarantee',
+    verdict: 'even',
+    solace: 'MQTT QoS 1 maps to Guaranteed messaging: the message spools and the broker redelivers it until it is acknowledged. Verified against a real broker in this repo.',
+    mqtt: 'Genuine guaranteed delivery, and a real strength. EMQX supports shared subscriptions at QoS 1 and 2. HiveMQ downgrades QoS 2 to QoS 1 inside a shared subscription — "Shared subscriptions with QoS 2 are automatically downgraded to QoS 1" — but QoS 1 is fully supported.',
+    sources: ['emqx', 'hivemq', 'repo'],
   },
   {
     id: 'pub-reconnect',
@@ -171,7 +172,10 @@ export const DIMENSIONS = [
     id: 'handoff-ordering',
     group: 'churn',
     dimension: 'Per-key ordering during a rebalance',
-    verdict: 'limit',
+    // Comparative, like every other verdict in this column: Solace bounds the
+    // exposure with a handoff window and an ack timer, a shared subscription
+    // does not bound it at all. The limitation itself stays stated in full.
+    verdict: 'solace',
     solace:
       'Not absolute, and Solace documents it: if a partition moves while a key sequence still has undelivered messages, "a key sequence can therefore split across consumers". The recommended mitigations are to externalise state or to "acknowledge only after receiving the last message in a sequence" — which "doesn\'t eliminate the problem, but it reduces the size of the window". "The recovery methods in these cases are application specific."',
     mqtt: 'The same exposure, with nothing bounding it — no handoff window, no ack timer, and under modulo strategies far more keys move per scaling event.',

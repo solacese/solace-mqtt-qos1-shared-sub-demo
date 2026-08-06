@@ -7,6 +7,8 @@
   import FlowLayer from './components/FlowLayer.svelte'
   import LogPanel from './components/LogPanel.svelte'
   import ComparisonTab from './components/ComparisonTab.svelte'
+  import DemoBanner from './components/DemoBanner.svelte'
+  import { DemoMode } from './lib/demoMode.svelte.js'
   import { LogStore } from './lib/log.svelte.js'
   import { FlowStore } from './lib/flow.svelte.js'
   import { MqttPublisher } from './lib/mqttPublisher.svelte.js'
@@ -19,6 +21,23 @@
 
   const publisher = new MqttPublisher({ log, flow })
   const consumers = new SolaceConsumers({ log, flow })
+
+  // On by default, so the page opens showing the pattern working rather than two
+  // disconnected panels and an empty stage. Clicking Connect on either side tears
+  // the simulation down on its own — see DemoMode.
+  const demo = new DemoMode({ publisher, consumers, log })
+  demo.enable()
+
+  $effect(() => {
+    if (!demo.enabled || !demo.streaming) return
+    return demo.startStream()
+  })
+
+  /** Publishing has to go through demo mode, or the card has nothing to route it. */
+  function publishOne() {
+    if (demo.enabled) demo.publishOnce()
+    else publisher.publish()
+  }
 
   /** The coordinate space for the flow lines and packet cards. */
   let stage = $state(null)
@@ -51,7 +70,7 @@
         log.warn('mqtt', 'The Solace queue is still being drained — nothing published')
         return
       }
-      publisher.publish()
+      publishOne()
     }
   }
 
@@ -135,11 +154,15 @@
     class="flex min-h-0 flex-1 flex-col gap-3"
     style:display={tab === 'demo' ? null : 'none'}
   >
+    {#if demo.enabled}
+      <DemoBanner {demo} onOpenComparison={() => (tab = 'why')} />
+    {/if}
+
     <!-- Outer grid: configuration on the flanks, visualisation in the middle. The
          flow overlay spans this whole element, so it can draw lines between any of
          the stage's nodes. -->
     <div bind:this={stage} class="relative grid min-h-0 flex-1 grid-cols-[19rem_1fr_21rem] gap-3">
-      <MqttPanel {publisher} blockedReason={publishBlockedReason} />
+      <MqttPanel {publisher} blockedReason={publishBlockedReason} onPublish={publishOne} />
 
       <!-- The stage. Everything here is a static representation of a participant;
            none of it is configuration. -->
