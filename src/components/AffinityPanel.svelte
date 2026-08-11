@@ -1,6 +1,14 @@
 <script>
   import { keyCss } from '../lib/keyColor.js'
-  import { KEYS, PUBLISHERS, PARTITION_COUNT, STRATEGIES, HOP_MS, topicOf } from '../lib/affinitySim.svelte.js'
+  import {
+    KEYS,
+    PUBLISHERS,
+    PARTITION_COUNT,
+    STRATEGIES,
+    HOP_MS,
+    partitionOf,
+    topicOf,
+  } from '../lib/affinitySim.svelte.js'
 
   let { sim, title, subtitle, ruleNote, accent, children } = $props()
 
@@ -63,6 +71,35 @@
 
   // Node labels come from the sim, so each routing rule has exactly one
   // implementation and the diagram cannot disagree with the dispatch.
+
+  /**
+   * A consumer wears the colours of the keys it owns, so a chip's colour and its
+   * destination match at a glance — the whole point of the diagram.
+   *
+   * Two keys on one consumer become hard-stop bands rather than a blend: a blend
+   * would invent a colour belonging to no key. A rule with no per-key affinity
+   * owns nothing exclusively, so those consumers stay on the panel accent — the
+   * absence of colour is itself the finding.
+   */
+  function ownedBackground(keys) {
+    if (!keys.length) return null
+    if (keys.length === 1) return keyCss(keys[0]).bg
+    const stops = keys.flatMap((k, i) => {
+      const { bg } = keyCss(k)
+      return [`${bg} ${(i / keys.length) * 100}%`, `${bg} ${((i + 1) / keys.length) * 100}%`]
+    })
+    return `linear-gradient(135deg, ${stops.join(', ')})`
+  }
+
+  /** The tokens shown under a consumer's name, each carrying its key's colour. */
+  function bindingTokens(id) {
+    const owned = sim.ownedKeys(id)
+    if (!owned.length) return null
+    if (sim.model === 'partition') {
+      return owned.map((key) => ({ key, label: `p${partitionOf(key)}` }))
+    }
+    return owned.map((key) => ({ key, label: key.replace('order-', 'o') }))
+  }
 </script>
 
 <section class="flex min-h-0 flex-col rounded-xl border border-ink-800 bg-ink-900/60">
@@ -169,22 +206,42 @@
     </div>
 
     {#each sim.consumers as c, i (c.id)}
+      {@const owned = sim.ownedKeys(c.id)}
+      {@const tokens = bindingTokens(c.id)}
+      {@const flashCss = c.flash && c.flashKey ? keyCss(c.flashKey) : null}
       <div
-        class="absolute z-10 w-[5.5rem] -translate-y-1/2 rounded-md border px-1.5 py-1 transition-colors {c.flash
-          ? accent.flash
-          : idle.has(c.id)
-            ? 'border-dashed border-ink-700 bg-ink-900/60'
-            : accent.consumer}"
+        class="absolute z-10 w-[5.5rem] -translate-y-1/2 rounded-md border px-1.5 py-1 transition-all {owned.length
+          ? ''
+          : c.flash
+            ? accent.flash
+            : idle.has(c.id)
+              ? 'border-dashed border-ink-700 bg-ink-900/60'
+              : accent.consumer}"
         style:left="{CONSUMER_X}%"
         style:top="{consumerY(i)}%"
+        style:background={ownedBackground(owned)}
+        style:border-color={owned.length === 1 ? keyCss(owned[0]).border : null}
+        style:box-shadow={flashCss ? `0 0 0 3px ${flashCss.glow}` : null}
       >
         <div class="flex items-baseline justify-between gap-1">
           <span class="font-mono text-[9px] text-slate-300">{c.id}</span>
           <span class="font-mono text-[10px] font-semibold {accent.text}">{c.count}</span>
         </div>
-        <span class="block truncate font-mono text-[8px] text-slate-500">
-          {sim.bindingFor(c.id)}
-        </span>
+
+        {#if tokens}
+          <!-- One token per owned key, in that key's colour, so the partition
+               number and the chip that lands here read as the same thing. -->
+          <span class="flex flex-wrap gap-x-1 font-mono text-[8px]">
+            {#each tokens as t (t.key)}
+              <span style:color={keyCss(t.key).fg} title={t.key}>{t.label}</span>
+            {/each}
+          </span>
+        {:else}
+          <span class="block truncate font-mono text-[8px] text-slate-500">
+            {sim.bindingFor(c.id)}
+          </span>
+        {/if}
+
         {#if idle.has(c.id)}
           <span class="block text-[8px] text-amber-400/80">unreachable</span>
         {/if}
@@ -267,14 +324,12 @@
           <span class="text-[9px] text-slate-600">→</span>
           {#if row.owners.length === 0}
             <span class="font-mono text-[9px] text-amber-400/80">held</span>
+          {:else if row.owners.length === 1}
+            <!-- Sole owner, so it can carry the key's colour — the same colour the
+                 consumer node and the message chip are wearing. -->
+            <span class="truncate font-mono text-[9px]" style:color={c.fg}>{row.owners[0]}</span>
           {:else}
-            <span
-              class="truncate font-mono text-[9px] {row.owners.length > 1
-                ? 'text-rose-300'
-                : 'text-slate-300'}"
-            >
-              {row.owners.join(', ')}
-            </span>
+            <span class="truncate font-mono text-[9px] text-rose-300">{row.owners.join(', ')}</span>
           {/if}
         </div>
       {/each}

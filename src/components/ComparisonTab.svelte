@@ -27,9 +27,7 @@
         Why a partitioned queue, when other brokers do MQTT shared subscriptions natively?
       </h2>
       <p class="mt-1.5 max-w-4xl text-[11.5px] leading-relaxed text-slate-400">
-        Not because of the delivery guarantee. EMQX supports shared subscriptions at QoS 1 and 2, and
-        HiveMQ at QoS 1 — that is real guaranteed delivery, and it is the one thing this comparison
-        does <em class="text-slate-300">not</em> turn on. The difference is
+        Not because of the delivery guarantee. The difference is
         <span class="font-semibold text-slate-200">what the broker is allowed to route on</span>. A
         shared subscription routes on the <span class="text-mqtt">publisher's identity</span> or the
         <span class="text-mqtt">topic string</span>. A partitioned queue routes on

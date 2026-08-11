@@ -252,6 +252,18 @@ export class DispatchSim {
     }
   }
 
+  /**
+   * Keys this consumer is the *sole* owner of.
+   *
+   * Empty when the rule has no per-key affinity, because then every consumer is a
+   * candidate for every key and no colour would be truthful. That is why the
+   * round_robin and random panels stay uncoloured while the partitioned one does
+   * not — the absence is the finding.
+   */
+  ownedKeys(id) {
+    return this.ownership.filter((o) => o.owners.length === 1 && o.owners[0] === id).map((o) => o.key)
+  }
+
   /** Consumers the routing rule can never reach, however many messages you send. */
   idleConsumers = $derived.by(() => {
     const reachable = new Set(this.ownership.flatMap((o) => o.owners))
@@ -477,7 +489,11 @@ export class DispatchSim {
     c.count++
     c.keys[msg.key] = (c.keys[msg.key] ?? 0) + 1
     c.flash = true
-    this.#after(LAND_MS, () => (c.flash = false))
+    c.flashKey = msg.key
+    this.#after(LAND_MS, () => {
+      c.flash = false
+      c.flashKey = null
+    })
 
     msg.stage = 'landed'
     this.#after(LAND_MS, () => {
@@ -563,7 +579,15 @@ export class DispatchSim {
 
   #addConsumer() {
     const n = ++this.#cseq
-    const c = $state({ id: `c${n}`, label: `consumer-${n}`, count: 0, keys: {}, flash: false })
+    const c = $state({
+      id: `c${n}`,
+      label: `consumer-${n}`,
+      count: 0,
+      keys: {},
+      flash: false,
+      /** Key of the message that just landed, so the flash can match its colour. */
+      flashKey: null,
+    })
     this.consumers.push(c)
     return c
   }
